@@ -1,0 +1,18 @@
+{
+  "home_assistant": {
+    "version": "2026.7.2"
+  },
+  "data": {
+    "config_entry_data": {
+      "data": {
+        "model": "xtl.vacuum.xm2216",
+        "server": "de",
+        "device_id": "0000000000"
+      }
+    },
+    "device_data": {
+      "map_data_raw": "eyJtYXBJZCI6MCwiZmllbGRzIjpbImV5SmxlSEJoYm1SbFpDSTZJREFzSUNKMGIzUmhiRmRwWkhSb0lqb2dPREF3TENBaWRHOTBZV3hJWldsbmFIUWlPaUE0TURBc0lDSjNhV1IwYUNJNklERXdOeXdnSW1obGFXZG9kQ0k2SURFMU5Dd2dJbmhOYVc0aU9pQXpNRFlzSUNKNVRXRjRJam9nTXpjNUxDQWljbVZ6YjJ4MWRHbHZiaUk2SURVc0lDSjBhVzFsYzNSaGJYQWlPaUFpTUNJc0lDSnRZWEFpT2lBaVNIZEJRa0ZRTHk5RGFEaENRVkZDVGtKdWQwTk1kMFZEUVZGQ1RFUXljMEV2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5OHZMeTh2THk4dkx5ODRha1E0VlRkV2R6aERRVkF2TjFWQlFVRkJRVUZCSWl3Z0lteDZORXhsYmlJNklERTJORGM0TENBaVpHbHlaV04wYVc5dUlqb2dNU3dnSW1Ob1lYSm5aVkJ2Y3lJNklDSjdYQ0o0WENJNklETTRPQ3dnWENKNVhDSTZJRE01T0N3Z1hDSmhYQ0k2SURFNE1EQXdmU0o5IiwiZXlKMGNtRmpaVWxrSWpvZ01Td2dJbk4wWVhKMElqb2dNU3dnSW5SdmRHRnNRMjkxYm5RaU9pQTRMQ0FpZEhKaFkyVWlPaUFpWjBGQlFVRkJRVUZCUVVGQklpd2dJbXg2TkV4bGJpSTZJRGg5Iiwie1wieFwiOiAzODcsIFwieVwiOiAzOTksIFwiYVwiOiA2LCBcImlcIjogMH0iLCIiLCIiLCIiLCIiLCIiLFtdXSwiY2xlYW5WYWx1ZXMiOltdfQ=="
+    }
+  },
+  "_note": "Synthetic fixture (rectangular floor plan). Not real device/home data."
+}

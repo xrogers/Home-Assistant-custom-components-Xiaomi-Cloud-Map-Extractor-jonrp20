@@ -1,0 +1,5 @@
+vacuum-map-parser-base==0.1.5
+lz4
+Pillow
+numpy
+pytest
