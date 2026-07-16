@@ -14,7 +14,6 @@
     "pybase64",
     "python-miio",
     "pycryptodome",
-    "lz4",
     "vacuum-map-parser-base==0.1.5",
     "vacuum-map-parser-roborock==0.1.4",
     "vacuum-map-parser-viomi==0.1.3",

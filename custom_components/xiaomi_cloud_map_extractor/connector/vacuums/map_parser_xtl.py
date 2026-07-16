@@ -4,7 +4,6 @@ import base64
 import json
 from typing import Any
 
-import lz4.block
 from PIL import Image
 
 from vacuum_map_parser_base.config.color import SupportedColor
@@ -12,10 +11,53 @@ from vacuum_map_parser_base.map_data import ImageData, MapData, Path, Point
 from vacuum_map_parser_base.map_data_parser import MapDataParser
 
 
+def lz4_decompress_block(src: bytes, uncompressed_size: int) -> bytes:
+    """Decompress an LZ4 *block* (not frame) in pure Python.
+
+    Home Assistant OS has no C toolchain, so the compiled `lz4` package cannot
+    be built there. The map's `map`/`trace` payloads are LZ4 block format; this
+    implements decompression only (literal/match sequences), which is all we
+    need. Verified byte-for-byte against the `lz4` library on real device data.
+    """
+    out = bytearray()
+    i, n = 0, len(src)
+    while i < n:
+        token = src[i]
+        i += 1
+        literal_length = token >> 4
+        if literal_length == 15:
+            while True:
+                b = src[i]
+                i += 1
+                literal_length += b
+                if b != 255:
+                    break
+        out += src[i:i + literal_length]
+        i += literal_length
+        if i >= n:
+            break
+        offset = src[i] | (src[i + 1] << 8)
+        i += 2
+        match_length = (token & 0x0F) + 4  # 4 == LZ4 minimum match
+        if (token & 0x0F) == 15:
+            while True:
+                b = src[i]
+                i += 1
+                match_length += b
+                if b != 255:
+                    break
+        start = len(out) - offset
+        for j in range(match_length):  # byte-by-byte to allow overlap
+            out.append(out[start + j])
+    if len(out) != uncompressed_size:
+        raise ValueError(f"LZ4 block size mismatch: {len(out)} != {uncompressed_size}")
+    return bytes(out)
+
+
 def decode_field0(outer_json: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
     """Return (field0_meta, occupancy_grid_bytes) for the primary map field."""
     meta = json.loads(base64.b64decode(outer_json["fields"][0]))
-    grid = lz4.block.decompress(base64.b64decode(meta["map"]), uncompressed_size=meta["lz4Len"])
+    grid = lz4_decompress_block(base64.b64decode(meta["map"]), meta["lz4Len"])
     return meta, grid
 
 

@@ -16,7 +16,13 @@ def test_xtl_registered_in_available_platforms():
     assert "XtlCloudVacuum," in src  # present in the AVAILABLE_VACUUM_PLATFORMS list literal
 
 
-def test_manifest_requires_lz4():
+def test_no_lz4_dependency_pure_python():
+    # HA OS has no C toolchain, so the compiled `lz4` package can't be built
+    # there. LZ4 decompression is done in pure Python instead, so the manifest
+    # must NOT require lz4 and the parser must not import it.
     import json
     manifest = json.loads((CC / "manifest.json").read_text())
-    assert "lz4" in manifest["requirements"]
+    assert not any("lz4" in req.lower() for req in manifest["requirements"])
+    parser_src = (CC / "connector" / "vacuums" / "map_parser_xtl.py").read_text()
+    assert "import lz4" not in parser_src
+    assert "def lz4_decompress_block" in parser_src
