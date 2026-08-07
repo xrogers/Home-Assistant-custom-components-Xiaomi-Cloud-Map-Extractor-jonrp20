@@ -83,6 +83,28 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         self._captcha_exception: CaptchaRequiredException | None = None
         self._two_factor_exception: TwoFactorAuthRequiredException | None = None
         self._wait_for_login_task: Task | None = None
+        self._auth_error: str | None = None
+
+    def _restart_auth(self, error: str = "cloud_login_error") -> None:
+        """Discard the rejected credentials and all in-flight login state.
+
+        A verification step (captcha / 2FA) can only ever re-send the username
+        and password captured in `async_step_auth_credentials`, together with the
+        `_sign` and captcha image obtained alongside them. Once the server has
+        rejected those credentials, that whole set is spent: the sign is stale and
+        the captcha image has been consumed, so re-showing the verification form
+        traps the user in a step that can never succeed. Clearing the state and
+        sending them back to the credentials form lets them correct the password
+        without abandoning the flow (which, for reauth, previously meant
+        restarting Home Assistant to get a fresh flow).
+        """
+        self._username = None
+        self._password = None
+        self._connector = None
+        self._captcha_exception = None
+        self._two_factor_exception = None
+        self._wait_for_login_task = None
+        self._auth_error = error
 
     @staticmethod
     @callback
@@ -142,6 +164,10 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             self: Self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         errors = {}
+        if user_input is None and self._auth_error is not None:
+            # Surface the failure from the verification step that sent us back here.
+            errors["base"] = self._auth_error
+            self._auth_error = None
         if user_input is not None:
             self._username = user_input.get(CONF_USERNAME)
             self._password = user_input.get(CONF_PASSWORD)
@@ -386,11 +412,19 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                 self._two_factor_exception = e
                 return await self.async_step_auth_two_factor()
             except XiaomiCloudMapExtractorException:
-                errors["base"] = "cloud_login_error"
+                # The captcha was accepted but the credentials behind it were
+                # rejected. Retrying the captcha re-sends the same bad password,
+                # so return to the credentials form instead of looping here.
+                self._restart_auth()
+                return await self.async_step_auth_credentials()
             except Exception as e:
                 _LOGGER.error("Unexpected exception while attempting Miio cloud login")
                 _LOGGER.error(e, exc_info=True)
                 return self.async_abort(reason="unknown")
+        if self._captcha_exception is None:
+            # No captcha to render (state was cleared) - restart rather than crash.
+            self._restart_auth()
+            return await self.async_step_auth_credentials()
         captcha_image_data = self._captcha_exception.image_data
         captcha_image_b64 = base64.b64encode(captcha_image_data).decode("utf-8")
 
@@ -424,7 +458,10 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                 self._two_factor_exception = e
                 return await self.async_step_auth_two_factor()
             except XiaomiCloudMapExtractorException:
-                errors["base"] = "cloud_login_error"
+                # Same trap as the captcha step: the stored credentials are spent,
+                # so send the user back to correct them.
+                self._restart_auth()
+                return await self.async_step_auth_credentials()
             except Exception as e:
                 _LOGGER.error("Unexpected exception while attempting Miio cloud login")
                 _LOGGER.error(e, exc_info=True)
