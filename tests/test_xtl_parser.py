@@ -30,7 +30,18 @@ def test_parse_produces_nonempty_image(raw_map_bytes, field0):
 
 def test_parse_reads_charger_from_json_string_chargepos(raw_map_bytes):
     md = _parser().parse(raw_map_bytes)
-    assert md.charger == Point(388, 398, 18000)
+    assert md.charger == Point(388, 398, 180.0)
+
+
+def test_headings_are_converted_from_centidegrees_to_degrees(raw_map_bytes):
+    # The device reports heading in centi-degrees: chargePos "a": 18000 is 180.00
+    # degrees. The base library treats Point.a as DEGREES -- _draw_vacuum computes
+    # a / 180 * pi and _draw_pieslice feeds it straight to PIL -- so passing 18000
+    # through raw wrapped to 18000 % 360 == 0 and drew the dock facing exactly
+    # backwards. Any real heading was mangled the same way (9000 -> 120 degrees).
+    md = _parser().parse(raw_map_bytes)
+    assert md.charger.a == 180.0
+    assert md.vacuum_position.a == 0.06
 
 
 def test_build_image_maps_grid_values_to_palette_colors(raw_map_bytes):
@@ -85,7 +96,7 @@ def test_build_image_puts_grid_row0_at_image_bottom():
 def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
     # fields[2] holds the live vacuum position {"x","y","a","i"} on the real device
     md = _parser().parse(raw_map_bytes)
-    assert md.vacuum_position == Point(387, 399, 6)
+    assert md.vacuum_position == Point(387, 399, 0.06)
 
 
 def _expected_pixel(field0: dict, x: int, y: int) -> tuple[int, int]:

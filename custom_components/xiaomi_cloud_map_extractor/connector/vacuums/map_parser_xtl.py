@@ -61,6 +61,9 @@ def decode_field0(outer_json: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
     return meta, grid
 
 
+# Device headings ("a") are centi-degrees; the parser base library wants degrees.
+_CENTIDEGREES_PER_DEGREE = 100
+
 # occupancy grid value -> palette color name
 _VALUE_COLORS = {
     0: SupportedColor.MAP_OUTSIDE,
@@ -121,7 +124,15 @@ class XtlMapDataParser(MapDataParser):
 
     @staticmethod
     def _parse_position(value: Any) -> Point | None:
-        """Parse a {"x","y","a"?} position (dict or JSON string) into a Point."""
+        """Parse a {"x","y","a"?} position (dict or JSON string) into a Point.
+
+        `a` is a heading in centi-degrees (chargePos reports 18000 for 180.00
+        degrees), but the base library treats Point.a as DEGREES: _draw_vacuum
+        computes `a / 180 * pi` and _draw_pieslice passes it straight to PIL. Left
+        raw, 18000 wraps to 18000 % 360 == 0 and the dock is drawn facing exactly
+        backwards; a real heading of 90 degrees arrives as 9000 and is drawn at
+        9000 % 360 == 120. So convert to degrees here, at the boundary.
+        """
         if not value:
             return None
         if isinstance(value, str):
@@ -131,7 +142,8 @@ class XtlMapDataParser(MapDataParser):
                 return None
         if not isinstance(value, dict) or "x" not in value or "y" not in value:
             return None
-        return Point(value["x"], value["y"], value.get("a"))
+        angle = value.get("a")
+        return Point(value["x"], value["y"], None if angle is None else angle / _CENTIDEGREES_PER_DEGREE)
 
     def _decode_path(self, outer: dict[str, Any]) -> Path | None:
         """Best-effort decode of the vacuum path from fields[1].

@@ -115,10 +115,29 @@ plus the code-level double-flip, not on a real map capture. `scripts/orientation
 renders all four orientations from a diagnostics download and remains the tool for
 confirming on-device; `b_flip_vertical.png` corresponds to what now ships.
 
-Note `tests/render_check.py` advertises itself as being for "visual orientation checks"
-but saves only `md.image.data` (the bare bitmap, no markers), so on the symmetric fixture
-its PNG is byte-identical before and after this fix. It cannot serve that purpose; use
-`scripts/orientation_probe.py`.
+### Correction
+
+An earlier revision of this doc (and the message of commit 5742b80) claimed
+`tests/render_check.py` "saves only the bare bitmap without markers, so its PNG is
+byte-identical before and after this fix". **Both halves of that are wrong.**
+
+`render_check.py` saves `md.image.data` *after* `parse()` has run `draw_map`, so the
+charger and vacuum markers are composited into it. Verified by counting colours in the
+output: opaque white pixels for the vacuum (`SupportedColor.ROBO`) and the alpha-blended
+charger fill `(67,184,201)` from `(102,254,218,127)` over the floor colour.
+
+The "byte-identical" claim was an artefact of my checking `git status` rather than the
+file: `tests/render_check.png` is gitignored (`.gitignore:155`) and untracked, so git
+never reports it as modified no matter what changes. It is a usable orientation check
+after all, though `scripts/orientation_probe.py` is still better for this purpose because
+it renders all four candidate orientations at once and marks the dock distinctly.
+
+Also worth recording, since it looks alarming when first observed: on this fixture the
+charger contributes only ~3 visible pixels despite `charger_radius: 6`. That is not a
+bug. The synthetic fixture has the vacuum docked (charger 388,398 vs vacuum 387,399), and
+`draw_map` iterates the drawables in enum order, so `VACUUM_POSITION` paints its opaque
+white disc over `CHARGER` which was drawn earlier. They separate on real data whenever the
+robot is away from the dock.
 
 ## Unrelated latent bug spotted (not fixed)
 

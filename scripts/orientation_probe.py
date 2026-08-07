@@ -128,6 +128,36 @@ def _field(outer: dict, index: int):
     return fields[index] if index < len(fields) else None
 
 
+def report_headings(meta: dict, outer: dict) -> None:
+    """Check the centi-degrees assumption for the "a" heading field.
+
+    The parser divides `a` by 100 because the base library treats Point.a as
+    degrees, and chargePos reports 18000 (= 180.00 degrees) which is meaningless
+    read as degrees. That inference came from a synthetic fixture, so confirm it
+    against real captures: collect a few while the robot is driving and check the
+    range. Values above 360 prove centi-degrees; a range that tops out near 360
+    would mean the division is wrong.
+    """
+    print("\nheading (\"a\") check:")
+    for label, raw in (("charger", meta.get("chargePos")), ("vacuum", _field(outer, 2))):
+        value = raw
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = None
+        angle = value.get("a") if isinstance(value, dict) else None
+        if angle is None:
+            print(f"  {label:8s} no 'a' field")
+            continue
+        verdict = "centi-degrees (>360, division correct)" if abs(angle) > 360 else "ambiguous at this value"
+        print(f"  {label:8s} raw={angle:<8} -> {angle / 100:g} deg   {verdict}")
+    print(
+        "  Collect several captures while the robot is moving. If any raw value\n"
+        "  exceeds 360, centi-degrees is confirmed for that field."
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("diagnostics", type=pathlib.Path)
@@ -145,6 +175,7 @@ def main() -> None:
         f"xMin={meta['xMin']} yMax={meta['yMax']} resolution={meta.get('resolution')}"
     )
     print(f"chargePos={meta.get('chargePos')!r}  vacuum={_field(outer, 2)!r}")
+    report_headings(meta, outer)
 
     for name, (flip_x, flip_y) in ORIENTATIONS.items():
         path = args.outdir / f"{name}.png"
