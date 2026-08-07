@@ -53,13 +53,33 @@ def test_build_image_maps_grid_values_to_palette_colors(raw_map_bytes):
     }
 
     # Assert on a freshly built image (no draw_map overlays / rotation) so the
-    # value -> color mapping is verified directly on real decoded grid data.
+    # value -> color mapping is verified directly on decoded grid data.
     img = _parser()._build_image(grid, width, height)
     px = img.load()
     for value, i in samples.items():
         # palette colors are RGB; PIL stores them in the RGBA image with alpha 255
         want = tuple(expected[value]) + (255,) if len(expected[value]) == 3 else tuple(expected[value])
-        assert px[i % width, i // width] == want
+        # grid row 0 is the BOTTOM of the picture - see _expected_pixel
+        assert px[i % width, height - 1 - i // width] == want
+
+
+def _rgba(color) -> tuple:
+    return tuple(color) + (255,) if len(color) == 3 else tuple(color)
+
+
+def test_build_image_puts_grid_row0_at_image_bottom():
+    # Uses a hand-built asymmetric grid on purpose: the committed fixture is a
+    # plain rectangle and is perfectly symmetric top-to-bottom (rows == rows[::-1]),
+    # so no assertion against it can distinguish a vertically flipped bitmap.
+    # Grid row 0 carries the lowest device y (yMax) and must therefore render at
+    # the BOTTOM, so the bitmap agrees with the marker mapping in _expected_pixel.
+    width, height = 3, 2
+    grid = bytes([1, 1, 1, 2, 2, 2])  # row 0 = wall, row 1 = inside
+    px = _parser()._build_image(grid, width, height).load()
+
+    palette = ColorsPalette()
+    assert px[0, height - 1] == _rgba(palette.get_color(SupportedColor.MAP_WALL_V2))
+    assert px[0, 0] == _rgba(palette.get_color(SupportedColor.MAP_INSIDE))
 
 
 def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
@@ -68,14 +88,37 @@ def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
     assert md.vacuum_position == Point(387, 399, 6)
 
 
-def test_charger_maps_onto_the_image(raw_map_bytes, field0):
-    # The charger (and vacuum) sit near the top of the window: with the y-down
-    # transform (pixel = x-xMin, y-yMax) they must land INSIDE the image, not
-    # off-canvas as the earlier y-up transform produced (y = -19).
+def _expected_pixel(field0: dict, x: int, y: int) -> tuple[int, int]:
+    """Where a device point must land in the rendered image.
+
+    The window spans device y in [yMax, yMax+height) with y increasing UPWARD in
+    the picture, so y == yMax is the BOTTOM row.
+    """
+    return x - field0["xMin"], field0["yMax"] + field0["height"] - 1 - y
+
+
+def test_charger_maps_to_exact_pixel(raw_map_bytes, field0):
+    # Asserting the EXACT pixel, not merely "somewhere inside the image". The
+    # weaker check this replaced was satisfied by the correct mapping *and* by its
+    # vertical mirror (img_y 134 vs 19, summing to height-1), which is why the
+    # flipped map in 264f7a0 shipped green.
     md = _parser().parse(raw_map_bytes)
     p = md.charger.to_img(md.image.dimensions)
-    assert 0 <= p.x < field0["width"]
-    assert 0 <= p.y < field0["height"]
+    assert (p.x, p.y) == _expected_pixel(field0, 388, 398)
+
+
+def test_vacuum_position_maps_to_exact_pixel(raw_map_bytes, field0):
+    md = _parser().parse(raw_map_bytes)
+    p = md.vacuum_position.to_img(md.image.dimensions)
+    assert (p.x, p.y) == _expected_pixel(field0, 387, 399)
+
+
+def test_markers_land_inside_the_image(raw_map_bytes, field0):
+    md = _parser().parse(raw_map_bytes)
+    for point in (md.charger, md.vacuum_position):
+        p = point.to_img(md.image.dimensions)
+        assert 0 <= p.x < field0["width"]
+        assert 0 <= p.y < field0["height"]
 
 
 def test_path_deferred_when_field1_present(raw_map_bytes):

@@ -84,23 +84,26 @@ class XtlMapDataParser(MapDataParser):
 
         image = self._build_image(grid, width, height)
 
-        # Coordinate system, confirmed against real device data: the charger
-        # (chargePos) and the live vacuum position (fields[2]) are both reported
-        # at y just above yMax, landing near the top of the occupancy grid. So
-        # the map window's top-left is (xMin, yMax) with y increasing DOWNWARD,
-        # and a device point (x, y) maps to pixel (x - xMin, y - yMax). The grid
-        # is stored row 0 = top, matching this.
+        # Coordinate system: the window covers device x in [xMin, xMin+width) and
+        # y in [yMax, yMax+height) -- despite the name, yMax is the window's
+        # LOWEST y. y increases upward in the rendered picture, so y == yMax is
+        # the bottom row and occupancy-grid row 0 is drawn at the bottom (see
+        # _build_image).
         #
-        # The base library's ImageData.to_img assumes y-up
-        # (y_img = height - (p.y - top) - 1). To make it yield (x - xMin, y - yMax)
-        # we pre-flip y in the transformation and use top=0, left=xMin.
-        def to_library_space(p: Point) -> Point:
-            return Point(p.x, (y_max + height - 1) - p.y, p.a)
-
+        # ImageDimensions.to_img already applies that y-up flip:
+        #     img_y = height - (p.y - top) - 1
+        # so passing top=yMax with no transformation of our own gives
+        # img_y = yMax + height - 1 - y, which is what we want.
+        #
+        # An earlier version ALSO pre-flipped y here and passed top=0. The two
+        # flips cancelled, leaving img_y = y - yMax: the entire map rendered
+        # mirrored top-to-bottom, with the charger drawn at the mirrored row.
+        # Passing the real top additionally makes ImageConfig trim work, since
+        # the base library offsets it by top.
         map_data = MapData(0, 1)
         map_data.image = ImageData(
-            width * height, 0, x_min, height, width,
-            self._image_config, image, to_library_space,
+            width * height, y_max, x_min, height, width,
+            self._image_config, image, lambda p: p,
         )
 
         map_data.charger = self._parse_position(meta.get("chargePos"))
@@ -156,10 +159,18 @@ class XtlMapDataParser(MapDataParser):
             return None
 
     def _build_image(self, grid: bytes, width: int, height: int) -> "Image.Image":
+        """Render the occupancy grid.
+
+        Grid row 0 carries the lowest device y (yMax), so it is drawn at the
+        BOTTOM of the image to match the y-up marker mapping in `parse`. The
+        bitmap and the markers must flip together or the charger detaches from
+        the walls.
+        """
         img = Image.new("RGBA", (width, height))
         px = img.load()
         outside = self._palette.get_color(SupportedColor.MAP_OUTSIDE)
         for i, value in enumerate(grid):
             color_name = _VALUE_COLORS.get(value)
-            px[i % width, i // width] = self._palette.get_color(color_name) if color_name else outside
+            color = self._palette.get_color(color_name) if color_name else outside
+            px[i % width, height - 1 - i // width] = color
         return img
