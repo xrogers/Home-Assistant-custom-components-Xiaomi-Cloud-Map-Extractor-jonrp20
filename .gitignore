@@ -157,3 +157,8 @@ tests/render_check.png
 
 # raw diagnostics dumps (contain device_id + home map)
 config_entry-*.json
+
+# Diagnostics dumps and their renders contain a floor plan of someone's home
+config_entry-xiaomi_cloud_map_extractor-*.json
+*.rendered.png
+coord_probe/

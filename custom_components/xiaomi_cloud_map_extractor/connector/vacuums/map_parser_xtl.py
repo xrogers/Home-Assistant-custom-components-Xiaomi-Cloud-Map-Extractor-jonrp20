@@ -64,12 +64,22 @@ def decode_field0(outer_json: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
 # Device headings ("a") are centi-degrees; the parser base library wants degrees.
 _CENTIDEGREES_PER_DEGREE = 100
 
-# occupancy grid value -> palette color name
+# Occupancy grid value -> palette color name. Real captures use 0..8: 0 is
+# unexplored, 1 is wall, 3 is plain floor, and 4 and up are per-room segment ids.
+# Anything not listed here is treated as a room id (see _build_image), because an
+# earlier version mapped only 0/1/2 and every other value fell through to the
+# background: on a real map that silently hid 21239 of 34194 cells (62%), leaving
+# bare wall outlines with no floor and no rooms.
 _VALUE_COLORS = {
     0: SupportedColor.MAP_OUTSIDE,
     1: SupportedColor.MAP_WALL_V2,
     2: SupportedColor.MAP_INSIDE,
+    3: SupportedColor.MAP_INSIDE,
 }
+
+# Grid values at or above this are per-room segment ids, colored via the palette's
+# room colors so the existing GUI "room colors" option applies to them.
+_FIRST_ROOM_VALUE = 4
 
 
 class XtlMapDataParser(MapDataParser):
@@ -87,26 +97,30 @@ class XtlMapDataParser(MapDataParser):
 
         image = self._build_image(grid, width, height)
 
-        # Coordinate system: the window covers device x in [xMin, xMin+width) and
-        # y in [yMax, yMax+height) -- despite the name, yMax is the window's
-        # LOWEST y. y increases upward in the rendered picture, so y == yMax is
-        # the bottom row and occupancy-grid row 0 is drawn at the bottom (see
-        # _build_image).
+        # Coordinate system, confirmed against a real xtl.vacuum.xm2216 capture:
+        # the device's axes are SWAPPED relative to the picture.
         #
-        # ImageDimensions.to_img already applies that y-up flip:
-        #     img_y = height - (p.y - top) - 1
-        # so passing top=yMax with no transformation of our own gives
-        # img_y = yMax + height - 1 - y, which is what we want.
+        #   device x -> image ROW,    anchored by xMin, range [xMin, xMin+height)
+        #   device y -> image COLUMN, anchored by yMax, range [yMax, yMax+width)
         #
-        # An earlier version ALSO pre-flipped y here and passed top=0. The two
-        # flips cancelled, leaving img_y = y - yMax: the entire map rendered
-        # mirrored top-to-bottom, with the charger drawn at the mirrored row.
-        # Passing the real top additionally makes ImageConfig trim work, since
-        # the base library offsets it by top.
+        # x increases upward in the picture, so x == xMin is the bottom row and
+        # occupancy-grid row 0 (which holds x == xMin) is drawn at the bottom; see
+        # _build_image. Grid column c holds y == yMax + c.
+        #
+        # ImageDimensions.to_img computes
+        #     img_x = p.x - left        img_y = height - (p.y - top) - 1
+        # so swapping x/y in the transformation and passing top=xMin, left=yMax
+        # yields img_x = y - yMax and img_y = xMin + height - 1 - x.
+        #
+        # Getting this wrong is not subtle but IS invisible on the synthetic
+        # fixture: reading x as the column put the charger at column 174 of a
+        # 139-wide real map, so both markers were drawn off-canvas and silently
+        # never appeared. The fixture's window happens to be wide enough to keep
+        # the bad mapping in bounds, which is why tests stayed green.
         map_data = MapData(0, 1)
         map_data.image = ImageData(
-            width * height, y_max, x_min, height, width,
-            self._image_config, image, lambda p: p,
+            width * height, x_min, y_max, height, width,
+            self._image_config, image, lambda p: Point(p.y, p.x, p.a),
         )
 
         map_data.charger = self._parse_position(meta.get("chargePos"))
@@ -180,9 +194,13 @@ class XtlMapDataParser(MapDataParser):
         """
         img = Image.new("RGBA", (width, height))
         px = img.load()
-        outside = self._palette.get_color(SupportedColor.MAP_OUTSIDE)
+        colors = {v: self._palette.get_color(c) for v, c in _VALUE_COLORS.items()}
+        for value in set(grid) - colors.keys():
+            colors[value] = (
+                self._palette.get_room_color(value)
+                if value >= _FIRST_ROOM_VALUE
+                else self._palette.get_color(SupportedColor.MAP_OUTSIDE)
+            )
         for i, value in enumerate(grid):
-            color_name = _VALUE_COLORS.get(value)
-            color = self._palette.get_color(color_name) if color_name else outside
-            px[i % width, height - 1 - i // width] = color
+            px[i % width, height - 1 - i // width] = colors[value]
         return img
