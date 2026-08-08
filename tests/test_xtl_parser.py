@@ -95,22 +95,24 @@ def test_build_image_puts_grid_row0_at_image_bottom():
     assert px[0, 0] == _rgba(palette.get_color(SupportedColor.MAP_INSIDE))
 
 
-def test_build_image_renders_floor_and_room_values():
-    # Real device grids use values 0..8: 0 unknown, 1 wall, 3 floor, 4+ room ids.
-    # Only 0/1/2 were mapped, so on a real capture 21239 of 34194 cells (62%) fell
-    # through to the background colour and the user saw bare wall outlines with no
-    # floor and no rooms.
+def test_build_image_renders_room_values():
+    # 0 unexplored, 1 wall, 2 unidentified, and everything from 3 up is a room id --
+    # confirmed by fields[3], whose entries carry these numbers as `room_id`. A real
+    # capture used 3,4,5,6,7,8,9,11, so ids are neither contiguous nor capped at 8.
+    # Only 0/1/2 used to be mapped, so on a real capture 21239 of 34194 cells (62%)
+    # fell through to the background: bare wall outlines, no rooms.
     width, height = 3, 3
-    grid = bytes([0, 1, 2, 3, 4, 5, 6, 7, 8])  # row 0 = [0,1,2], row 2 = [6,7,8]
+    grid = bytes([0, 1, 2, 3, 4, 5, 6, 9, 11])  # row 0 = [0,1,2], row 2 = [6,9,11]
     px = _parser()._build_image(grid, width, height).load()
 
     palette = ColorsPalette()
     # grid row 0 renders at the bottom, so grid row r -> image row height-1-r
-    assert px[1, 2] == _rgba(palette.get_color(SupportedColor.MAP_WALL_V2))  # value 1
-    assert px[0, 1] == _rgba(palette.get_color(SupportedColor.MAP_INSIDE))  # value 3 = floor
-    assert px[1, 1] == _rgba(palette.get_room_color(4))  # value 4 = room 4
-    assert px[2, 0] == _rgba(palette.get_room_color(8))  # value 8 = room 8
     assert px[0, 2] == _rgba(palette.get_color(SupportedColor.MAP_OUTSIDE))  # value 0
+    assert px[1, 2] == _rgba(palette.get_color(SupportedColor.MAP_WALL_V2))  # value 1
+    assert px[0, 1] == _rgba(palette.get_room_color(3))  # value 3 IS a room, not floor
+    assert px[1, 1] == _rgba(palette.get_room_color(4))
+    assert px[1, 0] == _rgba(palette.get_room_color(9))  # non-contiguous id
+    assert px[2, 0] == _rgba(palette.get_room_color(11))  # id above 8
 
 
 def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
@@ -122,13 +124,13 @@ def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
 def _expected_pixel(field0: dict, x: int, y: int) -> tuple[int, int]:
     """Where a device point must land in the rendered image.
 
-    The anchors are swapped relative to their names, but the axes are not: device
-    `x` is the image COLUMN anchored by yMax, and device `y` is the image ROW
-    anchored by xMin (increasing upward, so y == xMin is the bottom row). Pinned
-    against a real xtl.vacuum.xm2216 capture by locating the dock inside a known
-    obstacle on the left wall -- see docs/findings-2026-08-08-xtl-coordinates.md.
+    Device `y` is the image COLUMN and device `x` the image ROW, with x being a
+    top-down index on the totalHeight-row canvas and xMin the window's offset from
+    the canvas bottom. Fitted exactly against a real xtl.vacuum.xm2216 capture from
+    its room polygons -- see docs/findings-2026-08-08-xtl-coordinates.md.
     """
-    return x - field0["yMax"], field0["xMin"] + field0["height"] - 1 - y
+    x_offset = field0["totalHeight"] - field0["xMin"] - field0["height"]
+    return y - field0["yMax"], x - x_offset
 
 
 def test_charger_maps_to_exact_pixel(raw_map_bytes, field0):

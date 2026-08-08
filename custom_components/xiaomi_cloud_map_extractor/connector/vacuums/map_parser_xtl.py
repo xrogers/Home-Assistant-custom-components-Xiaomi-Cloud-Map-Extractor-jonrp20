@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 from typing import Any
 
 from PIL import Image
@@ -9,6 +10,8 @@ from PIL import Image
 from vacuum_map_parser_base.config.color import SupportedColor
 from vacuum_map_parser_base.map_data import ImageData, MapData, Path, Point
 from vacuum_map_parser_base.map_data_parser import MapDataParser
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def lz4_decompress_block(src: bytes, uncompressed_size: int) -> bytes:
@@ -64,22 +67,24 @@ def decode_field0(outer_json: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
 # Device headings ("a") are centi-degrees; the parser base library wants degrees.
 _CENTIDEGREES_PER_DEGREE = 100
 
-# Occupancy grid value -> palette color name. Real captures use 0..8: 0 is
-# unexplored, 1 is wall, 3 is plain floor, and 4 and up are per-room segment ids.
-# Anything not listed here is treated as a room id (see _build_image), because an
-# earlier version mapped only 0/1/2 and every other value fell through to the
+# Occupancy grid value -> palette color name. 0 is unexplored and 1 is wall; 2 is
+# unidentified (small scattered patches, possibly furniture) and is left as floor.
+# Everything from 3 up is a room id -- confirmed by fields[3], whose room entries
+# carry exactly these numbers in their `room_id`. A real capture used 3,4,5,6,7,8,9
+# and 11, so the ids are neither contiguous nor bounded by 8.
+#
+# An earlier version mapped only 0/1/2, so every room fell through to the
 # background: on a real map that silently hid 21239 of 34194 cells (62%), leaving
 # bare wall outlines with no floor and no rooms.
 _VALUE_COLORS = {
     0: SupportedColor.MAP_OUTSIDE,
     1: SupportedColor.MAP_WALL_V2,
     2: SupportedColor.MAP_INSIDE,
-    3: SupportedColor.MAP_INSIDE,
 }
 
-# Grid values at or above this are per-room segment ids, colored via the palette's
-# room colors so the existing GUI "room colors" option applies to them.
-_FIRST_ROOM_VALUE = 4
+# Grid values at or above this are room ids, colored via the palette's room colors
+# so the existing GUI "room colors" option applies to them.
+_FIRST_ROOM_VALUE = 3
 
 
 class XtlMapDataParser(MapDataParser):
@@ -97,45 +102,73 @@ class XtlMapDataParser(MapDataParser):
 
         image = self._trim_and_scale(self._build_image(grid, width, height), width, height)
 
-        # Coordinate system, pinned against a real xtl.vacuum.xm2216 capture: the
-        # ANCHORS are swapped relative to their names, but the axes are not.
+        # Coordinate system, fitted exactly against a real xtl.vacuum.xm2216 capture:
         #
-        #   device x -> image COLUMN, anchored by yMax, range [yMax, yMax+width)
-        #   device y -> image ROW,    anchored by xMin, range [xMin, xMin+height)
+        #   device y -> image COLUMN:  img_x = y - yMax
+        #   device x -> image ROW:     img_y = x - (totalHeight - xMin - height)
         #
-        # So `xMin` is the minimum of the *y* range and `yMax` the minimum of the
-        # *x* range. y increases upward in the picture, so y == xMin is the bottom
-        # row, matching occupancy-grid row 0 (see _build_image).
+        # Device `x` is a TOP-DOWN row index on the totalHeight-row canvas, while
+        # `xMin` is the window's offset from the canvas BOTTOM. Flipping x into a
+        # bottom-up index with (totalHeight - 1 - x) lets the window be anchored at
+        # top=xMin and lets ImageDimensions.to_img supply its own y-flip, which
+        # together give the formula above. Grid row 0 holds the largest device x and
+        # is drawn at the bottom (see _build_image).
         #
-        #     img_x = x - yMax
-        #     img_y = xMin + height - 1 - y
+        # How this was pinned, after two wrong guesses: fields[3] carries room
+        # definitions with centerX/centerY, fields[9] carries room polygons, and the
+        # occupancy values ARE those rooms' `room_id`s. Fitting the 8 rooms' polygon
+        # bounding boxes against their grid cells gives exact integer agreement on
+        # all 16 bounds, yielding the two constants as yMax and totalHeight-xMin-1.
+        # Rendering the room *names* at their mapped centers then puts every label
+        # inside its own colored region.
         #
-        # which is exactly what ImageDimensions.to_img produces from an identity
-        # transformation with top=xMin and left=yMax.
-        #
-        # How this was pinned: the reporter identified the dock as the upper of two
-        # obstacles against the left wall (the lower one is an air purifier). That
-        # obstacle occupies image rows 56..68 around columns 14..16. This mapping
-        # puts the charger at (15, 61) and the docked robot at (14, 61) -- inside
-        # it. Using xMin for x and yMax for y instead gives (25, 71), which is
-        # down-and-right of the obstacle in open floor, and reading x as the row
-        # gives column 174 on a 139-wide map, i.e. off-canvas and invisible.
-        #
-        # None of these are distinguishable on the synthetic fixture, whose window
-        # is wide enough to keep every variant in bounds.
+        # The earlier attempts leaned on a wall obstacle the reporter identified as
+        # the dock. That is far weaker evidence: brute-forcing offsets against the
+        # occupancy grid yields 228 placements that all land on an occupied cell, so
+        # two different mappings looked plausible that way and both were wrong. None
+        # of the variants is distinguishable on the synthetic fixture, whose window
+        # is wide enough to keep every one of them in bounds.
+        total_height = meta["totalHeight"]
+
+        def to_library_space(p: Point) -> Point:
+            return Point(p.y, (total_height - 1) - p.x, p.a)
+
         map_data = MapData(0, 1)
         map_data.image = ImageData(
             width * height, x_min, y_max, height, width,
-            self._image_config, image, lambda p: p,
+            self._image_config, image, to_library_space,
         )
 
         map_data.charger = self._parse_position(meta.get("chargePos"))
         map_data.vacuum_position = self._parse_position(self._field(outer, 2))
+        self._warn_if_off_canvas(map_data.charger, "charger", map_data.image)
+        self._warn_if_off_canvas(map_data.vacuum_position, "vacuum", map_data.image)
         map_data.path = self._decode_path(outer)
 
         if map_data.image is not None and not map_data.image.is_empty:
             self._image_generator.draw_map(map_data)
         return map_data
+
+    @staticmethod
+    def _warn_if_off_canvas(point: Point | None, name: str, image: ImageData) -> None:
+        """Log when a position maps outside the picture instead of vanishing silently.
+
+        PIL clips out-of-range draws without complaint, so a marker whose device
+        coordinates fall outside the map window simply never appears -- no error, no
+        log line. That is how a wrong coordinate mapping went unnoticed, and it also
+        happens legitimately when the device reports a live position outside the
+        current map window (seen on a real capture with the robot mid-clean, 23 cells
+        beyond the window's y range while the map itself only spanned the rooms).
+        """
+        if point is None or image is None or image.is_empty:
+            return
+        p = point.to_img(image.dimensions)
+        if not (0 <= p.x < image.data.width and 0 <= p.y < image.data.height):
+            _LOGGER.warning(
+                "XTL %s position (%s, %s) maps to (%s, %s), outside the %sx%s map "
+                "image; it will not be drawn",
+                name, point.x, point.y, p.x, p.y, image.data.width, image.data.height,
+            )
 
     @staticmethod
     def _field(outer: dict[str, Any], index: int) -> Any:

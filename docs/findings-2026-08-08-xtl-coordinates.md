@@ -11,51 +11,42 @@ partial fix, both markers a little down and to the right of where they belong.
 The real convention on `xtl.vacuum.xm2216`:
 
 ```
-device x -> image COLUMN, anchored by yMax, range [yMax, yMax+width)
-device y -> image ROW,    anchored by xMin, range [xMin, xMin+height)
+device y -> image COLUMN:  img_x = y - yMax
+device x -> image ROW:     img_y = x - (totalHeight - xMin - height)
 ```
 
-So `xMin` is the minimum of the **y** range and `yMax` the minimum of the **x** range. The
-axes themselves are *not* swapped — `x` really is horizontal. `y` increases upward in the
-picture, so `y == xMin` is the bottom row, matching occupancy-grid row 0.
+Device `x` is a **top-down** row index on the `totalHeight`-row canvas, while `xMin` is the
+window's offset from the canvas **bottom**. Flipping x into a bottom-up index with
+`totalHeight - 1 - x` lets the window be anchored at `top=xMin` and lets
+`ImageDimensions.to_img` supply its own y-flip, which together give the formula above.
 
-```
-img_x = x - yMax
-img_y = xMin + height - 1 - y
-```
+### How it was pinned — after two wrong guesses
 
-That is exactly what `ImageDimensions.to_img` produces from an **identity**
-transformation with `top=xMin`, `left=yMax`.
-
-### How it was pinned, and how it was first got wrong
-
-The original parser used `xMin` for x and `yMax` for y, giving column `388 - 214 = 174` on
-a **139**-wide real map. PIL clips silently, so both markers were drawn off-canvas: no
-marker, no error, no log line.
-
-The first attempted fix swapped the axes as well as the anchors, giving `(25, 71)`. That is
-in bounds and in the right general region, so it looked correct. It was not: it sits
-down-and-right of the true position in open floor.
-
-Brute-forcing candidate offsets against the occupancy grid produced 228 placements that
-all land on an occupied cell, so the grid alone could not decide it. What settled it was
-the reporter identifying the dock as **the upper of two obstacles against the left wall**
-(the lower one is an air purifier). Profiling the left wall's leftmost occupied column per
-row locates that obstacle at image **rows 56–68, columns 14–16**:
+`fields[3]` carries room definitions with `centerX`/`centerY` **and names**, `fields[9]`
+carries room polygons, and the occupancy values **are** those rooms' `room_id`s. Fitting
+the 8 rooms' polygon bounding boxes against their grid cells gives **exact integer
+agreement on all 16 bounds**, with the two constants falling out as `yMax` (373) and
+`totalHeight - xMin - 1` (585). Rendering the room *names* at their mapped centres then
+puts every label inside its own coloured region — Salon, Gabinet, Kuchnia, Łazienka,
+Łazienka1, Przedsionek and both Sypialnias.
 
 | mapping | charger | verdict |
 |---|---|---|
 | `xMin`→x, `yMax`→y (original) | col 174 | off-canvas, invisible |
-| axes swapped (first fix) | (25, 71) | in open floor, down-right of the dock |
-| **anchors swapped, axes kept** | **(15, 61)** | **inside the obstacle** |
+| axes swapped, x-row mirrored (`83202c1`) | (25, 71) | wrong row |
+| anchors swapped, axes kept (`5d3bf24`) | (15, 61) | wrong column *and* row |
+| **y→col, x→row from canvas bottom** | **(25, 45)** | **all 8 room labels correct** |
 
-The docked robot lands at `(14, 61)`, one column from the charger — consistent with a
-robot sitting on its dock.
+On the docked capture this puts the charger at `(25, 48)` and the robot at `(25, 47)` — one
+pixel apart, as a docked robot should be.
 
-Lesson worth keeping: a candidate that lands "in roughly the right area" is not
-confirmation. The two wrong variants both looked plausible against a verbal description of
-where the dock was ("~1/5 of the height, ~1/5 from the left"); only a feature with a known
-pixel footprint could discriminate them.
+**Lesson, learned the hard way twice.** Both wrong guesses were "confirmed" by weak
+evidence: a verbal description of where the dock sits, and then a wall obstacle the
+reporter identified as the dock. Brute-forcing offsets against the occupancy grid yields
+**228** placements that all land on an occupied cell, so "it lands on floor" and "it lands
+in roughly the right area" discriminate almost nothing. What finally worked was a reference
+set with many independent points and unambiguous labels. Prefer that over any amount of
+plausible-looking agreement — and prefer it *before* shipping, not after.
 
 ## Bug 2 — only 3 of 9 grid values were rendered
 
@@ -100,6 +91,32 @@ position and stays in bounds, and with trim applied the raster size equals the d
 Real `chargePos` reports `"a":-17999`. That cannot be degrees, which confirms the
 centi-degrees conversion added in f7e0257 (previously only inferred from the synthetic
 fixture's `18000`).
+
+## Unresolved: the live position can fall outside the map window
+
+On a capture taken mid-clean, `fields[2]` reported `{"x":424,"y":534}`. Under the confirmed
+mapping that is column **161** on a **139**-wide map — 23 cells beyond the window's y range
+`[373, 512)`. The row (81) is in bounds; only the column is not. So the robot marker cannot
+be drawn, which is exactly the reported "vacuum position stopped showing".
+
+This is not the coordinate bug above; the mapping is confirmed by 8 rooms. Observations:
+
+- The map's own content only spans y up to 508 (max room-polygon y), so the window really
+  does stop short of the reported position.
+- `cleanValues` was `[6, 7, 5, 11]`, i.e. the lower rooms, but the reported position maps
+  to row 81 in the upper half — inconsistent with the cleaning state.
+- Swapping the robot's x/y *would* place it in room 6 (one of those being cleaned), but
+  that same swap breaks the docked capture, where unswapped values put the robot one pixel
+  from the charger. So a swap is not the explanation.
+
+Candidate causes, undecided on one capture: the raster lags the live position (the map is
+regenerated less often), or the live position uses a different frame from `chargePos` and
+the room data. **Needs 2–3 more captures taken while the robot is driving**, ideally with a
+note of which room it was in, before guessing again.
+
+Meanwhile `_warn_if_off_canvas` logs a warning whenever a position maps outside the image.
+PIL clips silently, so this class of failure was previously invisible — no marker, no error,
+no log line — which is how the original mapping bug survived so long.
 
 ## Still open
 
