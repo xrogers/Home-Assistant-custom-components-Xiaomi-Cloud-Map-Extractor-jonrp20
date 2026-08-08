@@ -95,32 +95,38 @@ class XtlMapDataParser(MapDataParser):
         width, height = meta["width"], meta["height"]
         x_min, y_max = meta["xMin"], meta["yMax"]
 
-        image = self._build_image(grid, width, height)
+        image = self._trim_and_scale(self._build_image(grid, width, height), width, height)
 
-        # Coordinate system, confirmed against a real xtl.vacuum.xm2216 capture:
-        # the device's axes are SWAPPED relative to the picture.
+        # Coordinate system, pinned against a real xtl.vacuum.xm2216 capture: the
+        # ANCHORS are swapped relative to their names, but the axes are not.
         #
-        #   device x -> image ROW,    anchored by xMin, range [xMin, xMin+height)
-        #   device y -> image COLUMN, anchored by yMax, range [yMax, yMax+width)
+        #   device x -> image COLUMN, anchored by yMax, range [yMax, yMax+width)
+        #   device y -> image ROW,    anchored by xMin, range [xMin, xMin+height)
         #
-        # x increases upward in the picture, so x == xMin is the bottom row and
-        # occupancy-grid row 0 (which holds x == xMin) is drawn at the bottom; see
-        # _build_image. Grid column c holds y == yMax + c.
+        # So `xMin` is the minimum of the *y* range and `yMax` the minimum of the
+        # *x* range. y increases upward in the picture, so y == xMin is the bottom
+        # row, matching occupancy-grid row 0 (see _build_image).
         #
-        # ImageDimensions.to_img computes
-        #     img_x = p.x - left        img_y = height - (p.y - top) - 1
-        # so swapping x/y in the transformation and passing top=xMin, left=yMax
-        # yields img_x = y - yMax and img_y = xMin + height - 1 - x.
+        #     img_x = x - yMax
+        #     img_y = xMin + height - 1 - y
         #
-        # Getting this wrong is not subtle but IS invisible on the synthetic
-        # fixture: reading x as the column put the charger at column 174 of a
-        # 139-wide real map, so both markers were drawn off-canvas and silently
-        # never appeared. The fixture's window happens to be wide enough to keep
-        # the bad mapping in bounds, which is why tests stayed green.
+        # which is exactly what ImageDimensions.to_img produces from an identity
+        # transformation with top=xMin and left=yMax.
+        #
+        # How this was pinned: the reporter identified the dock as the upper of two
+        # obstacles against the left wall (the lower one is an air purifier). That
+        # obstacle occupies image rows 56..68 around columns 14..16. This mapping
+        # puts the charger at (15, 61) and the docked robot at (14, 61) -- inside
+        # it. Using xMin for x and yMax for y instead gives (25, 71), which is
+        # down-and-right of the obstacle in open floor, and reading x as the row
+        # gives column 174 on a 139-wide map, i.e. off-canvas and invisible.
+        #
+        # None of these are distinguishable on the synthetic fixture, whose window
+        # is wide enough to keep every variant in bounds.
         map_data = MapData(0, 1)
         map_data.image = ImageData(
             width * height, x_min, y_max, height, width,
-            self._image_config, image, lambda p: Point(p.y, p.x, p.a),
+            self._image_config, image, lambda p: p,
         )
 
         map_data.charger = self._parse_position(meta.get("chargePos"))
@@ -183,6 +189,36 @@ class XtlMapDataParser(MapDataParser):
             return None
         except Exception:
             return None
+
+    def _trim_and_scale(self, img: "Image.Image", width: int, height: int) -> "Image.Image":
+        """Crop by the configured trim and resize by the configured scale.
+
+        `ImageDimensions.to_img` multiplies marker coordinates by `scale` and
+        offsets them by the trim, but the base library never touches the raster --
+        producing it at the matching size is the parser's job. While this was
+        missing, any scale other than 1 left the bitmap at 1:1 while markers were
+        placed at scale x their true position, so the charger and robot drifted
+        right and down in proportion to the scale. Trim had the same mismatch.
+
+        The integer trim arithmetic mirrors `ImageData.__init__` exactly so the
+        cropped raster and `dimensions` cannot disagree.
+        """
+        trim = self._image_config.trim
+        left = int(trim.left * width / 100)
+        right = int(trim.right * width / 100)
+        top = int(trim.top * height / 100)
+        bottom = int(trim.bottom * height / 100)
+        if left or right or top or bottom:
+            # to_img places img_y == 0 at the row `top` pixels below the untrimmed
+            # top edge, so the crop is in image space, not device space.
+            img = img.crop((left, top, width - right, height - bottom))
+
+        scale = self._image_config.scale
+        if scale != 1:
+            img = img.resize(
+                (int(img.width * scale), int(img.height * scale)), Image.NEAREST
+            )
+        return img
 
     def _build_image(self, grid: bytes, width: int, height: int) -> "Image.Image":
         """Render the occupancy grid.

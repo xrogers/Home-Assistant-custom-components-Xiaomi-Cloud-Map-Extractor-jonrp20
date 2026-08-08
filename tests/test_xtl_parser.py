@@ -16,9 +16,11 @@ from vacuum_map_parser_base.config.size import Sizes
 from vacuum_map_parser_base.map_data import Point
 
 
-def _parser():
+def _parser(image_config: ImageConfig | None = None):
     from map_parser_xtl import XtlMapDataParser
-    return XtlMapDataParser(ColorsPalette(), Sizes(), list(Drawable), ImageConfig(), [])
+    return XtlMapDataParser(
+        ColorsPalette(), Sizes(), list(Drawable), image_config or ImageConfig(), []
+    )
 
 
 def test_parse_produces_nonempty_image(raw_map_bytes, field0):
@@ -120,12 +122,13 @@ def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
 def _expected_pixel(field0: dict, x: int, y: int) -> tuple[int, int]:
     """Where a device point must land in the rendered image.
 
-    The device's axes are swapped relative to the picture: device `x` is the image
-    ROW (anchored by xMin, increasing upward so x == xMin is the bottom row), and
-    device `y` is the image COLUMN (anchored by yMax). Confirmed against a real
-    xtl.vacuum.xm2216 capture -- see docs/findings-2026-08-08-xtl-coordinates.md.
+    The anchors are swapped relative to their names, but the axes are not: device
+    `x` is the image COLUMN anchored by yMax, and device `y` is the image ROW
+    anchored by xMin (increasing upward, so y == xMin is the bottom row). Pinned
+    against a real xtl.vacuum.xm2216 capture by locating the dock inside a known
+    obstacle on the left wall -- see docs/findings-2026-08-08-xtl-coordinates.md.
     """
-    return y - field0["yMax"], field0["xMin"] + field0["height"] - 1 - x
+    return x - field0["yMax"], field0["xMin"] + field0["height"] - 1 - y
 
 
 def test_charger_maps_to_exact_pixel(raw_map_bytes, field0):
@@ -142,6 +145,22 @@ def test_vacuum_position_maps_to_exact_pixel(raw_map_bytes, field0):
     md = _parser().parse(raw_map_bytes)
     p = md.vacuum_position.to_img(md.image.dimensions)
     assert (p.x, p.y) == _expected_pixel(field0, 387, 399)
+
+
+def test_raster_is_scaled_so_markers_stay_aligned(raw_map_bytes, field0):
+    # to_img multiplies marker coordinates by scale, but the base library never
+    # resizes the raster -- the parser must. While it didn't, any scale other than 1
+    # left the bitmap at 1:1 while markers were placed scale x further out, so the
+    # charger and robot drifted right and down in proportion to the scale.
+    scale = 2
+    md = _parser(ImageConfig(scale=scale)).parse(raw_map_bytes)
+    assert md.image.data.size == (field0["width"] * scale, field0["height"] * scale)
+
+    p = md.charger.to_img(md.image.dimensions)
+    want_x, want_y = _expected_pixel(field0, 388, 398)
+    assert (p.x, p.y) == (want_x * scale, want_y * scale)
+    # and the marker must still be inside the scaled raster
+    assert 0 <= p.x < md.image.data.width and 0 <= p.y < md.image.data.height
 
 
 def test_markers_land_inside_the_image(raw_map_bytes, field0):
