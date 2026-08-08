@@ -8,45 +8,55 @@ synthetic and its window is wide enough to keep every wrong variant in bounds.
 Symptom, in two stages: first no charger and no robot anywhere on the map; then, after a
 partial fix, both markers a little down and to the right of where they belong.
 
-The real convention on `xtl.vacuum.xm2216`:
+The real convention for **positions** (`chargePos`, `fields[2]`, the trace):
 
 ```
-device y -> image COLUMN:  img_x = y - yMax
-device x -> image ROW:     img_y = x - (totalHeight - xMin - height)
+device x -> image COLUMN:  img_x = x - yMax
+device y -> image ROW:     img_y = y - (totalHeight - xMin - height)
 ```
 
-Device `x` is a **top-down** row index on the `totalHeight`-row canvas, while `xMin` is the
-window's offset from the canvas **bottom**. Flipping x into a bottom-up index with
-`totalHeight - 1 - x` lets the window be anchored at `top=xMin` and lets
-`ImageDimensions.to_img` supply its own y-flip, which together give the formula above.
+`yMax` is the column anchor; `xMin` is the window's offset from the canvas **bottom**, so
+device `y` is a top-down row index on the `totalHeight`-row canvas. Flipping y with
+`totalHeight - 1 - y` lets the window be anchored at `top=xMin` and lets
+`ImageDimensions.to_img` supply its own y-flip.
 
-### How it was pinned — after two wrong guesses
+**The device transposes x/y between rooms and positions.** The room data in `fields[3]` and
+`fields[9]` uses the mirror image of the above (`centerX` is the row, `centerY` the column).
+Both were verified independently, so this is a real quirk of the format, not a mistake in
+one of the fits. Only the position frame matters to the parser, since rooms are consumed as
+grid values.
 
-`fields[3]` carries room definitions with `centerX`/`centerY` **and names**, `fields[9]`
-carries room polygons, and the occupancy values **are** those rooms' `room_id`s. Fitting
-the 8 rooms' polygon bounding boxes against their grid cells gives **exact integer
-agreement on all 16 bounds**, with the two constants falling out as `yMax` (373) and
-`totalHeight - xMin - 1` (585). Rendering the room *names* at their mapped centres then
-puts every label inside its own coloured region — Salon, Gabinet, Kuchnia, Łazienka,
-Łazienka1, Przedsionek and both Sypialnias.
+### How it was pinned — after three wrong guesses
 
-| mapping | charger | verdict |
-|---|---|---|
-| `xMin`→x, `yMax`→y (original) | col 174 | off-canvas, invisible |
-| axes swapped, x-row mirrored (`83202c1`) | (25, 71) | wrong row |
-| anchors swapped, axes kept (`5d3bf24`) | (15, 61) | wrong column *and* row |
-| **y→col, x→row from canvas bottom** | **(25, 45)** | **all 8 room labels correct** |
+`fields[1]` decodes to **7-byte records**: `x` int16 LE, `y` int16 LE, `angle` int16 LE,
+`flags` uint8 (observed 2, 10, 128, 130, 138; meaning unknown). Two facts confirm it:
 
-On the docked capture this puts the charger at `(25, 48)` and the robot at `(25, 47)` — one
-pixel apart, as a docked robot should be.
+- the **last record equals `fields[2]`** — the live position — exactly, in all three
+  captures;
+- scoring all **842** trace points from one capture against the occupancy grid, this
+  mapping puts **100% in bounds and 93.6% on room cells**. Every rival scores ~14% with
+  most points off-canvas.
 
-**Lesson, learned the hard way twice.** Both wrong guesses were "confirmed" by weak
-evidence: a verbal description of where the dock sits, and then a wall obstacle the
-reporter identified as the dock. Brute-forcing offsets against the occupancy grid yields
-**228** placements that all land on an occupied cell, so "it lands on floor" and "it lands
-in roughly the right area" discriminate almost nothing. What finally worked was a reference
-set with many independent points and unambiguous labels. Prefer that over any amount of
-plausible-looking agreement — and prefer it *before* shipping, not after.
+| mapping | charger | trace on rooms | verdict |
+|---|---|---|---|
+| `xMin`→x, `yMax`→y (original) | col 174 | — | off-canvas, invisible |
+| y→col, x→row mirrored (`83202c1`) | (25, 71) | 13.8% | wrong |
+| x→col, y→row mirrored (`5d3bf24`) | (15, 61) | 3.6% | wrong |
+| y→col, x→row (`bb2948d`, room frame) | (25, 45) | 14.7% | right for rooms, wrong for positions |
+| **x→col, y→row** | **(15, 55)** | **93.6%** | **correct** |
+
+The decisive visual: rendering the decoded path produces a serpentine cleaning trail that
+starts at the dock, follows the corridors and fills the room listed in `cleanValues`. That
+cannot happen under a wrong mapping.
+
+**Lesson, learned the hard way three times.** Every wrong guess was "confirmed" by weak
+evidence: a verbal description of where the dock sits, a wall obstacle identified as the
+dock, and finally an exact-looking fit to the *room* data that turned out to be a different
+frame from the positions. Brute-forcing offsets against the occupancy grid yields **228**
+placements that all land on an occupied cell, so "it lands on floor" and "it lands roughly
+right" discriminate almost nothing — and even a perfect fit proves only that you matched
+*that* data's frame. What worked was a dense reference set drawn from the same field family
+as the thing being mapped, plus a shape check (the path) that a wrong answer could not fake.
 
 ## Bug 2 — only 3 of 9 grid values were rendered
 
@@ -92,31 +102,27 @@ Real `chargePos` reports `"a":-17999`. That cannot be degrees, which confirms th
 centi-degrees conversion added in f7e0257 (previously only inferred from the synthetic
 fixture's `18000`).
 
-## Unresolved: the live position can fall outside the map window
+## Resolved: "vacuum position stopped showing"
 
-On a capture taken mid-clean, `fields[2]` reported `{"x":424,"y":534}`. Under the confirmed
-mapping that is column **161** on a **139**-wide map — 23 cells beyond the window's y range
-`[373, 512)`. The row (81) is in bounds; only the column is not. So the robot marker cannot
-be drawn, which is exactly the reported "vacuum position stopped showing".
+An earlier revision of this document recorded this as an unresolved device quirk — the
+live position appearing to fall outside the map window, possibly because the raster lagged
+it. That was wrong: it was simply the wrong coordinate frame. Under the corrected mapping
+the robot is in bounds in all three captures, including both mid-clean ones.
 
-This is not the coordinate bug above; the mapping is confirmed by 8 rooms. Observations:
+`_warn_if_off_canvas` stays, because the failure mode it covers is real and was invisible:
+PIL clips out-of-range draws silently, so a marker with bad coordinates produced no marker,
+no error and no log line. That is how the original mapping bug survived several releases.
 
-- The map's own content only spans y up to 508 (max room-polygon y), so the window really
-  does stop short of the reported position.
-- `cleanValues` was `[6, 7, 5, 11]`, i.e. the lower rooms, but the reported position maps
-  to row 81 in the upper half — inconsistent with the cleaning state.
-- Swapping the robot's x/y *would* place it in room 6 (one of those being cleaned), but
-  that same swap breaks the docked capture, where unswapped values put the robot one pixel
-  from the charger. So a swap is not the explanation.
+## Bug 4 — the path was never decoded
 
-Candidate causes, undecided on one capture: the raster lags the live position (the map is
-regenerated less often), or the live position uses a different frame from `chargePos` and
-the room data. **Needs 2–3 more captures taken while the robot is driving**, ideally with a
-note of which room it was in, before guessing again.
+`_decode_path` used to return `None`, on the belief that the trace was "1 byte per point"
+in an unknown per-step encoding. It is not: `totalCount` is the **record** count, and each
+record is 7 bytes. Real captures decode to 347, 842 and 9701 points.
 
-Meanwhile `_warn_if_off_canvas` logs a warning whenever a position maps outside the image.
-PIL clips silently, so this class of failure was previously invisible — no marker, no error,
-no log line — which is how the original mapping bug survived so long.
+Points are split into segments whenever consecutive samples jump more than a few cells
+(`_TRACE_GAP`), so a gap is not drawn as a straight line across the flat. Real captures show
+only a handful of such jumps. The per-point angle is centi-degrees, like every other heading
+in this format.
 
 ## Still open
 
@@ -128,7 +134,7 @@ no log line — which is how the original mapping bug survived so long.
 - **Marker heading semantics are unverified.** The angle is correctly scaled, but whether
   the swapped anchors also imply a sign or offset change was not tested; it only affects
   which way the pieslice and bin-cover line point.
-- **`path` is still deferred.** The `fields[1]` trace encoding is unreverse-engineered.
+- **Trace `flags` byte is unidentified** (values 2, 10, 128, 130, 138). Possibly mop/suction state.
 - **`rotate` is untested** against a real capture now that the raster is scaled.
 
 ## Reproducing

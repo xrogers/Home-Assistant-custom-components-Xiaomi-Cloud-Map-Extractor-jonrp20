@@ -1,3 +1,4 @@
+import base64
 import json
 from map_parser_xtl import decode_field0
 
@@ -124,13 +125,14 @@ def test_parse_reads_vacuum_position_from_field2(raw_map_bytes):
 def _expected_pixel(field0: dict, x: int, y: int) -> tuple[int, int]:
     """Where a device point must land in the rendered image.
 
-    Device `y` is the image COLUMN and device `x` the image ROW, with x being a
-    top-down index on the totalHeight-row canvas and xMin the window's offset from
-    the canvas bottom. Fitted exactly against a real xtl.vacuum.xm2216 capture from
-    its room polygons -- see docs/findings-2026-08-08-xtl-coordinates.md.
+    Device `x` is the image COLUMN (anchored by yMax) and device `y` the image ROW,
+    y being a top-down index on the totalHeight-row canvas with xMin the window's
+    offset from the canvas bottom. Fitted against 842 real trace points -- see
+    docs/findings-2026-08-08-xtl-coordinates.md. Note the room data in
+    fields[3]/fields[9] uses the transposed form of this.
     """
-    x_offset = field0["totalHeight"] - field0["xMin"] - field0["height"]
-    return y - field0["yMax"], x - x_offset
+    y_offset = field0["totalHeight"] - field0["xMin"] - field0["height"]
+    return x - field0["yMax"], y - y_offset
 
 
 def test_charger_maps_to_exact_pixel(raw_map_bytes, field0):
@@ -171,6 +173,60 @@ def test_markers_land_inside_the_image(raw_map_bytes, field0):
         p = point.to_img(md.image.dimensions)
         assert 0 <= p.x < field0["width"]
         assert 0 <= p.y < field0["height"]
+
+
+def _trace_field(points: list[tuple[int, int, int]], flags: int = 128) -> str:
+    """Build a fields[1] payload: 7-byte records, LZ4-block-compressed, base64'd.
+
+    Emitted as LZ4 "stored" blocks (token 0xF0 + length bytes, no match) so the
+    parser's real decompressor is exercised rather than bypassed.
+    """
+    import struct as _struct
+
+    body = b"".join(_struct.pack("<hhhB", x, y, a, flags) for x, y, a in points)
+    out = bytearray()
+    literal = len(body)
+    if literal < 15:
+        out.append(literal << 4)
+    else:
+        out.append(0xF0)
+        remaining = literal - 15
+        while remaining >= 255:
+            out.append(255)
+            remaining -= 255
+        out.append(remaining)
+    out += body
+    return base64.b64encode(
+        json.dumps({"traceId": 1, "start": 1, "totalCount": len(points),
+                    "trace": base64.b64encode(bytes(out)).decode(), "lz4Len": len(body)}).encode()
+    ).decode()
+
+
+def test_path_decoded_from_seven_byte_trace_records(raw_map_bytes, field0):
+    # fields[1] holds 7-byte records (x/y/angle int16 LE + flags). Confirmed on real
+    # captures by the last record equalling fields[2] exactly.
+    outer = json.loads(raw_map_bytes)
+    pts = [(390, 400, 0), (391, 401, 100), (392, 402, 200)]
+    outer["fields"][1] = _trace_field(pts)
+    md = _parser().parse(json.dumps(outer).encode())
+
+    assert md.path is not None
+    assert [(p.x, p.y) for p in md.path.path[0]] == [(x, y) for x, y, _ in pts]
+    assert md.path.path[0][1].a == 1.0  # angle is centi-degrees -> degrees
+    # and the points must map into the image like any other position
+    p = md.path.path[0][0].to_img(md.image.dimensions)
+    assert (p.x, p.y) == _expected_pixel(field0, 390, 400)
+
+
+def test_path_splits_into_segments_on_a_jump(raw_map_bytes):
+    # A gap must not be drawn as a straight line across the flat.
+    outer = json.loads(raw_map_bytes)
+    outer["fields"][1] = _trace_field(
+        [(390, 400, 0), (391, 401, 0), (450, 470, 0), (451, 471, 0)]
+    )
+    md = _parser().parse(json.dumps(outer).encode())
+    assert md.path is not None and len(md.path.path) == 2
+    assert [(p.x, p.y) for p in md.path.path[1]] == [(450, 470), (451, 471)]
 
 
 def test_path_deferred_when_field1_present(raw_map_bytes):

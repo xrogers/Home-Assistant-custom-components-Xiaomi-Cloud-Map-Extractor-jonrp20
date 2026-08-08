@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import struct
 from typing import Any
 
 from PIL import Image
@@ -67,6 +68,14 @@ def decode_field0(outer_json: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
 # Device headings ("a") are centi-degrees; the parser base library wants degrees.
 _CENTIDEGREES_PER_DEGREE = 100
 
+# fields[1] trace records: x int16, y int16, angle int16, flags uint8.
+_TRACE_RECORD_SIZE = 7
+
+# Consecutive trace points further apart than this start a new path segment, so a
+# gap is not drawn as a straight line across the flat. Real captures show only a
+# handful of such jumps (2-43 out of hundreds to thousands of points).
+_TRACE_GAP = 5
+
 # Occupancy grid value -> palette color name. 0 is unexplored and 1 is wall; 2 is
 # unidentified (small scattered patches, possibly furniture) and is left as floor.
 # Everything from 3 up is a room id -- confirmed by fields[3], whose room entries
@@ -102,36 +111,43 @@ class XtlMapDataParser(MapDataParser):
 
         image = self._trim_and_scale(self._build_image(grid, width, height), width, height)
 
-        # Coordinate system, fitted exactly against a real xtl.vacuum.xm2216 capture:
+        # Coordinate system for POSITIONS (chargePos, fields[2], the trace), fitted
+        # against 842 real trace points:
         #
-        #   device y -> image COLUMN:  img_x = y - yMax
-        #   device x -> image ROW:     img_y = x - (totalHeight - xMin - height)
+        #   device x -> image COLUMN:  img_x = x - yMax
+        #   device y -> image ROW:     img_y = y - (totalHeight - xMin - height)
         #
-        # Device `x` is a TOP-DOWN row index on the totalHeight-row canvas, while
-        # `xMin` is the window's offset from the canvas BOTTOM. Flipping x into a
-        # bottom-up index with (totalHeight - 1 - x) lets the window be anchored at
-        # top=xMin and lets ImageDimensions.to_img supply its own y-flip, which
-        # together give the formula above. Grid row 0 holds the largest device x and
-        # is drawn at the bottom (see _build_image).
+        # `yMax` is the column anchor and `xMin` is the window's offset from the
+        # canvas BOTTOM, so device y is a top-down row index on the totalHeight-row
+        # canvas. Flipping y with (totalHeight - 1 - y) lets the window be anchored
+        # at top=xMin and lets ImageDimensions.to_img supply its own y-flip, which
+        # together give the formula above.
         #
-        # How this was pinned, after two wrong guesses: fields[3] carries room
-        # definitions with centerX/centerY, fields[9] carries room polygons, and the
-        # occupancy values ARE those rooms' `room_id`s. Fitting the 8 rooms' polygon
-        # bounding boxes against their grid cells gives exact integer agreement on
-        # all 16 bounds, yielding the two constants as yMax and totalHeight-xMin-1.
-        # Rendering the room *names* at their mapped centers then puts every label
-        # inside its own colored region.
+        # Beware: the ROOM data in fields[3]/fields[9] uses the TRANSPOSED form of
+        # this (centerX is the row, centerY the column). Both were verified
+        # independently -- the room polygons fit their grid cells to the exact
+        # integer on all 16 bounding-box bounds, and the trace fit is below -- so the
+        # device really does transpose x/y between rooms and positions. Only the
+        # position frame matters here, since rooms are consumed as grid values.
         #
-        # The earlier attempts leaned on a wall obstacle the reporter identified as
-        # the dock. That is far weaker evidence: brute-forcing offsets against the
-        # occupancy grid yields 228 placements that all land on an occupied cell, so
-        # two different mappings looked plausible that way and both were wrong. None
-        # of the variants is distinguishable on the synthetic fixture, whose window
-        # is wide enough to keep every one of them in bounds.
+        # How this was pinned, after three wrong guesses: fields[1] decodes to
+        # 7-byte records (x int16 LE, y int16 LE, angle int16 LE, flags) and its
+        # LAST point equals fields[2] exactly in all three captures, which both
+        # confirms the record layout and proves the trace shares the position frame.
+        # Scoring all 842 points against the occupancy grid, this mapping puts 100%
+        # in bounds and 93.6% on room cells; every rival scores ~14% with most points
+        # off-canvas.
+        #
+        # The earlier guesses leaned on the reporter's description of where the dock
+        # sits and on a wall obstacle they identified as the dock. That is far weaker:
+        # brute-forcing offsets against the grid yields 228 placements that all land
+        # on an occupied cell. Two mappings looked plausible that way and both were
+        # wrong, and none of the variants is distinguishable on the synthetic fixture,
+        # whose window is wide enough to keep every one of them in bounds.
         total_height = meta["totalHeight"]
 
         def to_library_space(p: Point) -> Point:
-            return Point(p.y, (total_height - 1) - p.x, p.a)
+            return Point(p.x, (total_height - 1) - p.y, p.a)
 
         map_data = MapData(0, 1)
         map_data.image = ImageData(
@@ -199,16 +215,26 @@ class XtlMapDataParser(MapDataParser):
         return Point(value["x"], value["y"], None if angle is None else angle / _CENTIDEGREES_PER_DEGREE)
 
     def _decode_path(self, outer: dict[str, Any]) -> Path | None:
-        """Best-effort decode of the vacuum path from fields[1].
+        """Decode the vacuum path from fields[1].
 
-        Field 1 (when present) is a JSON header
-        {traceId, start, totalCount, trace, lz4Len}; `trace` is base64 -> LZ4 ->
-        `lz4Len` bytes. On the real device this decompresses to exactly
-        `totalCount` bytes (1 byte per point) -- i.e. NOT x/y coordinate pairs
-        but a compact per-step encoding (direction/delta) whose layout is not yet
-        reverse-engineered. Until that encoding is understood we cannot produce
-        real Point coordinates, so path rendering is deferred and this returns
-        None. It must never raise (that would break map parsing).
+        Field 1 is a JSON header {traceId, start, totalCount, trace, lz4Len};
+        `trace` is base64 -> LZ4 block -> `lz4Len` bytes, which is a flat array of
+        7-byte records:
+
+            x     int16 little-endian
+            y     int16 little-endian
+            angle int16 little-endian
+            flags uint8   (observed 2, 10, 128, 130, 138 -- meaning unknown)
+
+        Confirmed by the last record equalling fields[2] (the live position)
+        exactly across three real captures, and by 93.6% of 842 points landing on
+        room cells under the position mapping in `parse`.
+
+        `totalCount` is the record count, not the byte count. Records are dropped
+        into segments whenever consecutive points jump more than a few cells, so a
+        gap in the trace is not drawn as a straight line across the flat.
+
+        Must never raise: a bad trace should cost the path, not the whole map.
         """
         try:
             field = self._field(outer, 1)
@@ -217,10 +243,27 @@ class XtlMapDataParser(MapDataParser):
             header = json.loads(base64.b64decode(field))
             if "trace" not in header:
                 return None
-            # Structure recognised (trace/lz4Len), but the 1-byte-per-point
-            # encoding is not yet decoded -- defer rather than emit bogus points.
-            return None
+            raw = lz4_decompress_block(base64.b64decode(header["trace"]), header["lz4Len"])
+            if not raw or len(raw) % _TRACE_RECORD_SIZE:
+                # Not the record layout we know (the synthetic test fixture is one
+                # such case) -- defer rather than emit bogus points.
+                return None
+
+            segments: list[list[Point]] = [[]]
+            previous: tuple[int, int] | None = None
+            for offset in range(0, len(raw), _TRACE_RECORD_SIZE):
+                x, y, angle = struct.unpack_from("<hhh", raw, offset)
+                if previous is not None and max(abs(x - previous[0]), abs(y - previous[1])) > _TRACE_GAP:
+                    segments.append([])
+                segments[-1].append(Point(x, y, angle / _CENTIDEGREES_PER_DEGREE))
+                previous = (x, y)
+
+            segments = [s for s in segments if len(s) > 1]
+            if not segments:
+                return None
+            return Path(sum(len(s) for s in segments), 1, None, segments)
         except Exception:
+            _LOGGER.debug("XTL path decode failed", exc_info=True)
             return None
 
     def _trim_and_scale(self, img: "Image.Image", width: int, height: int) -> "Image.Image":
