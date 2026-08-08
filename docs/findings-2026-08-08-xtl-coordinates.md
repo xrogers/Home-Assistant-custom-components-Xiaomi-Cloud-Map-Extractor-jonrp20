@@ -1,12 +1,13 @@
 # XTL coordinates, grid values and scale, resolved against real hardware (2026-08-08)
 
-Three bugs. All of them were invisible to the test suite, because the committed fixture is
-synthetic and its window is wide enough to keep every wrong variant in bounds.
+Four bugs. All of them were invisible to the test suite, because the committed fixture is
+synthetic: its window is wide enough to keep every wrong coordinate variant in bounds, it
+contains only grid values 0/1/2, and its trace is not in the real record format.
 
-## Bug 1 — the window anchors are swapped relative to their names
+## Bug 1 — the position coordinate frame
 
-Symptom, in two stages: first no charger and no robot anywhere on the map; then, after a
-partial fix, both markers a little down and to the right of where they belong.
+Symptom, in stages: first no charger and no robot anywhere on the map; then both markers
+offset; then the robot vanishing again whenever it left the dock.
 
 The real convention for **positions** (`chargePos`, `fields[2]`, the trace):
 
@@ -58,27 +59,29 @@ right" discriminate almost nothing — and even a perfect fit proves only that y
 *that* data's frame. What worked was a dense reference set drawn from the same field family
 as the thing being mapped, plus a shape check (the path) that a wrong answer could not fake.
 
-## Bug 2 — only 3 of 9 grid values were rendered
+## Bug 2 — only 3 of 10 grid values were rendered
 
-`_VALUE_COLORS` mapped values 0, 1 and 2. The real grid uses **0..8**:
+`_VALUE_COLORS` mapped values 0, 1 and 2. A real grid used **0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+11**:
 
 | value | count | meaning |
 |---|---|---|
 | 0 | 11002 | unexplored |
 | 1 | 1683 | wall |
-| 2 | 270 | (small scattered patches; left as MAP_INSIDE) |
-| 3 | 10435 | plain floor |
-| 4–8 | 10804 | per-room segment ids (5 rooms) |
+| 2 | 270 | unidentified; small scattered patches, left as MAP_INSIDE |
+| 3, 4, 5, 6, 7, 8, 9, 11 | 21239 | room ids |
 
 Everything from 3 up fell through to the background colour: **21239 of 34194 cells (62%)**
-of a real map. The user saw bare wall outlines with no floor and no rooms, which reads as
-"I see only the map of my flat".
+of a real map. The user saw bare wall outlines with no rooms, which reads as "I see only the
+map of my flat".
 
-Now 3 renders as floor and values >= 4 go through `ColorsPalette.get_room_color`, so the
-existing GUI **room colors** option applies to them for free (it feeds
-`_overridden_room_colors`, and `get_room_color` wraps ids modulo the palette size). The
-reporter confirmed the resulting room layout matches their flat. Distinct colours on the
-real capture went from 3 to 12.
+Value 3 is **not** plain floor — it is a room (`Salon`). `fields[3]` proves it: each room
+entry's `room_id` is exactly one of these grid values. The ids are neither contiguous nor
+capped at 8, so `_FIRST_ROOM_VALUE` is 3 and anything at or above it is coloured via
+`ColorsPalette.get_room_color`. That makes the existing GUI **room colors** option apply to
+them for free (it feeds `_overridden_room_colors`, and `get_room_color` wraps ids modulo the
+palette size). The reporter confirmed the resulting layout matches their flat, and distinct
+colours on the real capture went from 3 to 12.
 
 ## Bug 3 — the raster was never scaled or trimmed
 
