@@ -1,6 +1,6 @@
 import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Self, Type
 
@@ -61,6 +61,7 @@ class XiaomiCloudMapExtractorConnector:
     _server: str | None
     _session_creator: Callable[[], ClientSession]
     _connector_config: XiaomiCloudConnectorConfig | None
+    _config_saver: Callable[[XiaomiCloudConnectorConfig], Awaitable[None]] | None
     _forced_refresh: bool
     _auto_update: bool
     _last_hash: str | None
@@ -70,9 +71,11 @@ class XiaomiCloudMapExtractorConnector:
         session_creator: Callable[[], ClientSession],
         config: XiaomiCloudMapExtractorConnectorConfiguration,
         connector_config: XiaomiCloudConnectorConfig | None,
+        config_saver: Callable[[XiaomiCloudConnectorConfig], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._connector_config = connector_config
+        self._config_saver = config_saver
         self._session_creator = session_creator
         self._cloud_connector = None
         self._vacuum_connector: BaseXiaomiCloudVacuum | None = None
@@ -106,13 +109,20 @@ class XiaomiCloudMapExtractorConnector:
         authenticated = self._is_authenticated()
         _LOGGER.debug("Is user authenticated: %s", authenticated)
         if not authenticated:
-            if self._config.username is None or self._config.password is None:
-                raise FailedLoginException()
-            await self._cloud_connector.login_with_credentials(self._config.username, self._config.password)
-            if not self._is_authenticated():
-                _LOGGER.error("Not authenticated!")
-                raise FailedLoginException()
-            _LOGGER.debug("Logged in.")
+            # Prefer the stored passToken: it outlives the serviceToken and needs
+            # no password, so no captcha or 2FA challenge can be raised.
+            refreshed = (await self._cloud_connector.login_with_pass_token()) is not None
+            if refreshed and self._is_authenticated():
+                _LOGGER.debug("Session refreshed without credentials.")
+            else:
+                if self._config.username is None or self._config.password is None:
+                    raise FailedLoginException()
+                await self._cloud_connector.login_with_credentials(self._config.username, self._config.password)
+                if not self._is_authenticated():
+                    _LOGGER.error("Not authenticated!")
+                    raise FailedLoginException()
+                _LOGGER.debug("Logged in.")
+            await self._save_connector_config()
         if self._vacuum_connector is None or self._status == XiaomiCloudMapExtractorConnectorStatus.UNINITIALIZED:
             _LOGGER.debug("Initializing...")
             await self._initialize()
@@ -129,6 +139,17 @@ class XiaomiCloudMapExtractorConnector:
 
     def _is_authenticated(self: Self) -> bool:
         return self._cloud_connector.is_authenticated()
+
+    async def _save_connector_config(self: Self) -> None:
+        """Persist the fresh session so a restart does not require a new login."""
+        if self._config_saver is None:
+            return
+        try:
+            self._connector_config = self._cloud_connector.to_config()
+            await self._config_saver(self._connector_config)
+            _LOGGER.debug("Stored connector configuration.")
+        except Exception:  # noqa: BLE001 - storing the session must never break an update
+            _LOGGER.warning("Failed to store connector configuration", exc_info=True)
 
     async def _initialize(self: Self) -> None:
         _LOGGER.debug("Retrieving device info, server: %s", self._config.server)

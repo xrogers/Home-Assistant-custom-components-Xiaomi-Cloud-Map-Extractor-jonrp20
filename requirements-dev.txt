@@ -2,3 +2,6 @@ vacuum-map-parser-base==0.1.5
 Pillow
 numpy
 pytest
+aiohttp
+tzlocal
+pycryptodome
